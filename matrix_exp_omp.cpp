@@ -1,6 +1,7 @@
-#include <cmath>
-#include <cstdio>
 #include <omp.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #define SIZE 3
 #define N_TERMS 5000000000
@@ -67,126 +68,51 @@ int main() {
         {0.3, 0.0, 0.5},
         {0.6, 0.2, 0.1}
     };
-    double taylor_sum[SIZE][SIZE] = {0};
-    double current_term[SIZE][SIZE];
-    double temp_matrix[SIZE][SIZE];
 
-    // Calculate optimal M_jump_size
-    long M_jump_size = (long)sqrt((double)N_TERMS);
-    if (M_jump_size == 0) M_jump_size = 1;
+    double global_taylor_sum[SIZE][SIZE] = {0.0};
+    double identity_matrix[SIZE][SIZE];
+    matrix_identity(identity_matrix);
 
     double start_time = omp_get_wtime();
 
-    // Precompute A^M
-    Matrix A_pow_M_struct;
-    if (M_jump_size == 1) {
-        for(int r=0; r<SIZE; ++r) 
-            for(int c=0; c<SIZE; ++c) 
-                A_pow_M_struct.data[r][c] = A[r][c];
-    } else {
-        matrix_identity(A_pow_M_struct.data);
-        for (long i = 0; i < M_jump_size; ++i) {
-            A_pow_M_struct = matrix_multiply(A_pow_M_struct.data, A);
-        }
-    }
-
-    // Parallel computation of Taylor series
+    // Используем редукцию по матрице через приватные переменные
     #pragma omp parallel
     {
-        double local_sum[SIZE][SIZE] = {0};
-        double local_current_term[SIZE][SIZE];
-        double local_temp_matrix[SIZE][SIZE];
+        Matrix local_sum;
+        for (int i = 0; i < SIZE; ++i)
+            for (int j = 0; j < SIZE; ++j)
+                local_sum.data[i][j] = 0.0;
 
-        // Determine each thread's chunk of work
-        int thread_id = omp_get_thread_num();
-        int num_threads = omp_get_num_threads();
-        
-        long chunk_size = N_TERMS / num_threads;
-        long remainder = N_TERMS % num_threads;
-        
-        long start_k = thread_id * chunk_size + ((thread_id < remainder) ? thread_id : remainder) + 1;
-        long end_k = start_k + chunk_size - 1 + (thread_id < remainder ? 1 : 0);
-        
-        if (end_k > N_TERMS) end_k = N_TERMS;
-        if (start_k > end_k) start_k = end_k + 1; // No work for this thread
+        Matrix current_term;
+        for (int i = 0; i < SIZE; ++i)
+            for (int j = 0; j < SIZE; ++j)
+                current_term.data[i][j] = identity_matrix[i][j];
 
-        // Compute initial term for this thread's chunk
-        Matrix current_T_val_struct;
-        double my_initial_term_T_km1[SIZE][SIZE];
-        
-        long target_k_for_precalc = start_k - 1;
-        
-        if (target_k_for_precalc <= 0) {
-            matrix_identity(my_initial_term_T_km1);
-        } else {
-            matrix_identity(current_T_val_struct.data);
-            long current_k_val = 0;
-
-            // Process in jumps of M_jump_size
-            for (long j = 0; j < target_k_for_precalc / M_jump_size; ++j) {
-                double scalar_prod_inv = 1.0;
-                for (long l = 1; l <= M_jump_size; ++l) {
-                    scalar_prod_inv /= (double)(current_k_val + l);
-                }
-                Matrix temp_prod_struct = matrix_multiply(current_T_val_struct.data, A_pow_M_struct.data);
-                current_T_val_struct = matrix_scalar_multiply(temp_prod_struct.data, scalar_prod_inv);
-                current_k_val += M_jump_size;
-            }
-
-            // Process remaining terms
-            for (long l = 0; l < target_k_for_precalc % M_jump_size; ++l) {
-                current_k_val += 1;
-                Matrix temp_prod_struct = matrix_multiply(current_T_val_struct.data, A);
-                current_T_val_struct = matrix_scalar_multiply(temp_prod_struct.data, 1.0 / (double)current_k_val);
-            }
-            
-            for(int r=0; r<SIZE; ++r) 
-                for(int c=0; c<SIZE; ++c) 
-                    my_initial_term_T_km1[r][c] = current_T_val_struct.data[r][c];
+        #pragma omp for schedule(static)
+        for (long k = 1; k <= N_TERMS; ++k) {
+            current_term = matrix_multiply(current_term.data, A);
+            Matrix term = matrix_scalar_multiply(current_term.data, 1.0 / (double)k);
+            local_sum = matrix_add(local_sum.data, term.data);
         }
 
-        // Initialize current term
-        for(int r=0; r<SIZE; ++r) 
-            for(int c=0; c<SIZE; ++c) 
-                local_current_term[r][c] = my_initial_term_T_km1[r][c];
-
-        // Compute terms in this thread's chunk
-        for (long k = start_k; k <= end_k; ++k) {
-            Matrix term_A_prod_struct = matrix_multiply(local_current_term, A);
-            for (int r = 0; r < SIZE; ++r) 
-                for (int c = 0; c < SIZE; ++c) 
-                    local_temp_matrix[r][c] = term_A_prod_struct.data[r][c];
-                    
-            Matrix actual_term_k_struct = matrix_scalar_multiply(local_temp_matrix, 1.0 / (double)k);
-            Matrix new_sum_struct = matrix_add(local_sum, actual_term_k_struct.data);
-            
-            for (int r = 0; r < SIZE; ++r) 
-                for (int c = 0; c < SIZE; ++c) {
-                    local_sum[r][c] = new_sum_struct.data[r][c];
-                    local_current_term[r][c] = actual_term_k_struct.data[r][c];
-                }
-        }
-
-        // Combine results from all threads
+        // Критическая секция для аккумулирования глобального результата
         #pragma omp critical
         {
-            for (int r = 0; r < SIZE; ++r) 
-                for (int c = 0; c < SIZE; ++c) 
-                    taylor_sum[r][c] += local_sum[r][c];
+            for (int i = 0; i < SIZE; ++i)
+                for (int j = 0; j < SIZE; ++j)
+                    global_taylor_sum[i][j] += local_sum.data[i][j];
         }
     }
 
-    // Add the identity matrix (k=0 term)
-    matrix_identity(temp_matrix);
-    Matrix final_sum_struct = matrix_add(taylor_sum, temp_matrix);
-    for (int r = 0; r < SIZE; ++r) 
-        for (int c = 0; c < SIZE; ++c) 
-            taylor_sum[r][c] = final_sum_struct.data[r][c];
+    // Добавляем единичную матрицу (T_0 = I)
+    for (int i = 0; i < SIZE; ++i)
+        for (int j = 0; j < SIZE; ++j)
+            global_taylor_sum[i][j] += identity_matrix[i][j];
 
     double end_time = omp_get_wtime();
 
     matrix_print("Matrix A", A);
-    matrix_print("Result e^A (Taylor approximation)", taylor_sum);
+    matrix_print("Result e^A (Taylor approximation)", global_taylor_sum);
     printf("Time taken: %f seconds\n", end_time - start_time);
 
     return 0;
