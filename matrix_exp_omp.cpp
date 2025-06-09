@@ -1,119 +1,121 @@
+#include <cmath>
+#include <iostream>
+#include <vector>
 #include <omp.h>
-#include <math.h>
-#include <stdio.h>
-#include <stdlib.h>
 
-#define SIZE 3
-#define N_TERMS 5000000000
+constexpr int SIZE = 3;
+constexpr int N_TERMS = 5000;
 
-typedef struct {
+class Matrix {
+public:
     double data[SIZE][SIZE];
-} Matrix;
 
-void matrix_print(const char* label, const double matrix[SIZE][SIZE]) {
-    printf("%s:\n", label);
-    for (int i = 0; i < SIZE; i++) {
-        for (int j = 0; j < SIZE; j++) {
-            printf("%8.4f ", matrix[i][j]);
-        }
-        printf("\n");
+    Matrix() {
+        #pragma omp parallel for collapse(2)
+        for (int i = 0; i < SIZE; ++i)
+            for (int j = 0; j < SIZE; ++j)
+                data[i][j] = 0.0;
     }
-    printf("\n");
-}
 
-Matrix matrix_multiply(const double matrix1[SIZE][SIZE], const double matrix2[SIZE][SIZE]) {
-    Matrix result;
-    for (int i = 0; i < SIZE; i++) {
-        for (int j = 0; j < SIZE; j++) {
-            result.data[i][j] = 0.0;
-            for (int k = 0; k < SIZE; k++) {
-                result.data[i][j] += matrix1[i][k] * matrix2[k][j];
+    Matrix(double value) {
+        #pragma omp parallel for collapse(2)
+        for (int i = 0; i < SIZE; ++i)
+            for (int j = 0; j < SIZE; ++j)
+                data[i][j] = value;
+    }
+
+    static Matrix Identity() {
+        Matrix m;
+        #pragma omp parallel for
+        for (int i = 0; i < SIZE; ++i)
+            m.data[i][i] = 1.0;
+        return m;
+    }
+
+    void print(const std::string& label) const {
+        std::cout << label << " (" << SIZE << "x" << SIZE << "):\n";
+        for (int i = 0; i < SIZE; ++i) {
+            std::cout << "[ ";
+            for (int j = 0; j < SIZE; ++j) {
+                printf("%8.4f ", data[i][j]);
+            }
+            std::cout << "]\n";
+        }
+    }
+
+    Matrix operator+(const Matrix& other) const {
+        Matrix result;
+        #pragma omp parallel for collapse(2)
+        for (int i = 0; i < SIZE; ++i)
+            for (int j = 0; j < SIZE; ++j)
+                result.data[i][j] = data[i][j] + other.data[i][j];
+        return result;
+    }
+
+    Matrix operator*(const Matrix& other) const {
+        Matrix result;
+        #pragma omp parallel for collapse(2)
+        for (int i = 0; i < SIZE; ++i) {
+            for (int j = 0; j < SIZE; ++j) {
+                double sum = 0.0;
+                #pragma omp simd reduction(+:sum)
+                for (int k = 0; k < SIZE; ++k) {
+                    sum += data[i][k] * other.data[k][j];
+                }
+                result.data[i][j] = sum;
+            }
+        }
+        return result;
+    }
+
+    Matrix operator*(double scalar) const {
+        Matrix result;
+        #pragma omp parallel for collapse(2)
+        for (int i = 0; i < SIZE; ++i)
+            for (int j = 0; j < SIZE; ++j)
+                result.data[i][j] = data[i][j] * scalar;
+        return result;
+    }
+};
+
+Matrix calculateTaylorSum(const Matrix& A) {
+    Matrix taylor_sum = Matrix::Identity(); // Start with identity matrix (k=0 term)
+    Matrix current_term = Matrix::Identity(); // Current term (A^k / k!)
+    
+    for (long k = 1; k <= N_TERMS; ++k) {
+        current_term = current_term * A * (1.0 / k);
+        
+        // Parallel reduction for matrix addition
+        #pragma omp parallel for collapse(2)
+        for (int i = 0; i < SIZE; ++i) {
+            for (int j = 0; j < SIZE; ++j) {
+                taylor_sum.data[i][j] += current_term.data[i][j];
             }
         }
     }
-    return result;
+    
+    return taylor_sum;
 }
 
-Matrix matrix_add(const double matrix1[SIZE][SIZE], const double matrix2[SIZE][SIZE]) {
-    Matrix result;
-    for (int i = 0; i < SIZE; i++) {
-        for (int j = 0; j < SIZE; j++) {
-            result.data[i][j] = matrix1[i][j] + matrix2[i][j];
-        }
-    }
-    return result;
-}
-
-void matrix_identity(double matrix[SIZE][SIZE]) {
-    for (int i = 0; i < SIZE; i++) {
-        for (int j = 0; j < SIZE; j++) {
-            matrix[i][j] = (i == j) ? 1.0 : 0.0;
-        }
-    }
-}
-
-Matrix matrix_scalar_multiply(const double matrix[SIZE][SIZE], double scalar) {
-    Matrix result;
-    for (int i = 0; i < SIZE; i++) {
-        for (int j = 0; j < SIZE; j++) {
-            result.data[i][j] = matrix[i][j] * scalar;
-        }
-    }
-    return result;
-}
-
-int main() {
-    double A[SIZE][SIZE] = {
-        {0.1, 0.4, 0.2},
-        {0.3, 0.0, 0.5},
-        {0.6, 0.2, 0.1}
-    };
-
-    double global_taylor_sum[SIZE][SIZE] = {0.0};
-    double identity_matrix[SIZE][SIZE];
-    matrix_identity(identity_matrix);
+int main(int argc, char* argv[]) {
+    Matrix A;
+    A.data[0][0] = 1; A.data[0][1] = -1; A.data[0][2] = -1;
+    A.data[1][0] = 1; A.data[1][1] = 1; A.data[1][2] = 0;
+    A.data[2][0] = 3; A.data[2][1] = 0; A.data[2][2] = 1;
 
     double start_time = omp_get_wtime();
 
-    // Используем редукцию по матрице через приватные переменные
-    #pragma omp parallel
-    {
-        Matrix local_sum;
-        for (int i = 0; i < SIZE; ++i)
-            for (int j = 0; j < SIZE; ++j)
-                local_sum.data[i][j] = 0.0;
-
-        Matrix current_term;
-        for (int i = 0; i < SIZE; ++i)
-            for (int j = 0; j < SIZE; ++j)
-                current_term.data[i][j] = identity_matrix[i][j];
-
-        #pragma omp for schedule(static)
-        for (long k = 1; k <= N_TERMS; ++k) {
-            current_term = matrix_multiply(current_term.data, A);
-            Matrix term = matrix_scalar_multiply(current_term.data, 1.0 / (double)k);
-            local_sum = matrix_add(local_sum.data, term.data);
-        }
-
-        // Критическая секция для аккумулирования глобального результата
-        #pragma omp critical
-        {
-            for (int i = 0; i < SIZE; ++i)
-                for (int j = 0; j < SIZE; ++j)
-                    global_taylor_sum[i][j] += local_sum.data[i][j];
-        }
-    }
-
-    // Добавляем единичную матрицу (T_0 = I)
-    for (int i = 0; i < SIZE; ++i)
-        for (int j = 0; j < SIZE; ++j)
-            global_taylor_sum[i][j] += identity_matrix[i][j];
+    Matrix taylor_sum = calculateTaylorSum(A);
 
     double end_time = omp_get_wtime();
 
-    matrix_print("Matrix A", A);
-    matrix_print("Result e^A (Taylor approximation)", global_taylor_sum);
-    printf("Time taken: %f seconds\n", end_time - start_time);
+    std::cout << "Matrix size: " << SIZE << "x" << SIZE << "\n";
+    std::cout << "Number of terms: " << N_TERMS << " (+ Identity)\n";
+    
+    A.print("A (Initial)");
+    std::cout << "Calculation finished.\n";
+    printf("Execution time: %f seconds\n", end_time - start_time);
+    taylor_sum.print("e^A (Result)");
 
     return 0;
 }
